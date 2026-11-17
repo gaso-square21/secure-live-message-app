@@ -6,6 +6,7 @@ import {
 } from '@angular/ssr/node';
 import express from 'express';
 import { join } from 'node:path';
+import { createRelay } from './server/relay';
 
 const browserDistFolder = join(import.meta.dirname, '../browser');
 
@@ -13,16 +14,33 @@ const app = express();
 const angularApp = new AngularNodeAppEngine();
 
 /**
- * Example Express Rest API endpoints can be defined here.
- * Uncomment and define endpoints as necessary.
- *
- * Example:
- * ```ts
- * app.get('/api/{*splat}', (req, res) => {
- *   // Handle API request
- * });
- * ```
+ * Security headers for every response.
+ * - no-referrer: the session id in the path must not leak to other sites through links.
+ * - CSP: only same-origin scripts and connections, so injected markup cannot run code or send
+ *   the key elsewhere. Inline styles are allowed because Angular injects component styles.
  */
+app.use((_req, res, next) => {
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader(
+    'Content-Security-Policy',
+    [
+      "default-src 'self'",
+      "script-src 'self'",
+      "style-src 'self' 'unsafe-inline'",
+      "connect-src 'self'",
+      "base-uri 'self'",
+      "form-action 'none'",
+      "frame-ancestors 'none'",
+    ].join('; '),
+  );
+  next();
+});
+
+/**
+ * Ciphertext relay API.
+ */
+app.use('/api', createRelay());
 
 /**
  * Serve static files from /browser
