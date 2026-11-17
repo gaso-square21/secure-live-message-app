@@ -1,28 +1,64 @@
-import { ChangeDetectionStrategy, Component, signal } from '@angular/core';
-import { generateKeyText, importKey, open, seal } from '../core/crypto';
-import { parseFrame } from '../core/frame';
+import { ChangeDetectionStrategy, Component, input } from '@angular/core';
+import { Frame } from '../core/frame';
+import { SenderTransport } from '../core/transport';
 
-const MAX_ENTRIES = 20;
 const CT_PREVIEW_CHARS = 64;
-
-/** Placeholder session id: nothing here talks to a server. */
-const PREVIEW_SESSION = 'local-preview';
 
 export interface LogEntry {
   readonly seq: number;
-  readonly plaintext: string;
   readonly iv: string;
   readonly ct: string;
+  /** Size of the JSON body sent to the relay. */
   readonly wireBytes: number;
+  /** Time from starting the request to the relay's answer. */
   readonly ms: number;
-  /** The text read back from the wire form, or null if it failed to verify. */
-  readonly decrypted: string | null;
+  readonly outcome: 'sent' | 'failed';
 }
 
 /**
- * Shows what happens to each edit: it is encrypted, turned into the JSON frame the relay would
- * carry, then read back the way the receiver does (shape check, then authenticated decryption).
- * Runs entirely in this page with its own throwaway key; the key itself is never displayed.
+ * Wraps a sender transport so every frame and its outcome are reported, without changing what is
+ * sent or how failures propagate.
+ */
+export function withFrameLog(
+  transport: SenderTransport,
+  onEntry: (entry: LogEntry) => void,
+): SenderTransport {
+  return {
+    async send(frame: Frame): Promise<void> {
+      const start = performance.now();
+      const report = (outcome: LogEntry['outcome']) =>
+        onEntry({
+          seq: frame.seq,
+          iv: frame.iv,
+          ct: frame.ct,
+          wireBytes: new TextEncoder().encode(JSON.stringify(frame)).length,
+          ms: performance.now() - start,
+          outcome,
+        });
+      try {
+        await transport.send(frame);
+      } catch (error) {
+        report('failed');
+        throw error;
+      }
+      report('sent');
+    },
+  };
+}
+
+/**
+ * Development aid: lists the frames the sender handed to the relay, newest first. This is
+ * everything the server receives: a sequence number, an IV and ciphertext, never the text or the
+ * key.
+ *
+ * Not used by any page, so it is not part of the build. To show it on the sender page, wrap the
+ * transport and render the entries:
+ *
+ *   transport: withFrameLog(this.relay.senderTransport(created), (entry) =>
+ *     this.log.update((list) => [entry, ...list].slice(0, 20)),
+ *   ),
+ *
+ *   <app-encryption-log [entries]="log()" />
  */
 @Component({
   selector: 'app-encryption-log',
@@ -31,8 +67,8 @@ export interface LogEntry {
     <section class="mt-6" aria-labelledby="log-heading">
       <h2 id="log-heading" class="text-sm font-medium">Encryption log</h2>
       <p class="mt-1 text-xs text-slate-500">
-        Local preview with a throwaway key: each edit is encrypted and read back in this page.
-        Nothing is sent yet.
+        Every frame sent to the server. This is all it sees: never the text or the key. Fast typing
+        is batched, so there are fewer frames than keystrokes.
       </p>
 
       @if (entries().length === 0) {
@@ -44,24 +80,18 @@ export interface LogEntry {
           @for (entry of entries(); track entry.seq) {
             <li class="rounded border border-sky-100 p-3 text-xs">
               <p class="font-medium">
-                #{{ entry.seq }} · {{ entry.plaintext.length }} chars → {{ entry.wireBytes }} bytes
-                on the wire · {{ entry.ms.toFixed(1) }} ms
+                #{{ entry.seq }} · {{ entry.wireBytes }} bytes ·
+                @if (entry.outcome === 'sent') {
+                  <span class="text-green-700">sent in {{ entry.ms.toFixed(0) }} ms</span>
+                } @else {
+                  <span class="text-red-700">failed, will retry</span>
+                }
               </p>
               <dl class="mt-1 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5">
-                <dt class="text-slate-500">Plaintext</dt>
-                <dd class="break-all whitespace-pre-wrap">{{ entry.plaintext }}</dd>
                 <dt class="text-slate-500">IV</dt>
                 <dd class="font-mono break-all">{{ entry.iv }}</dd>
                 <dt class="text-slate-500">Ciphertext</dt>
                 <dd class="font-mono break-all">{{ preview(entry.ct) }}</dd>
-                <dt class="text-slate-500">Decrypted</dt>
-                @if (entry.decrypted !== null) {
-                  <dd class="break-all whitespace-pre-wrap text-green-700" data-testid="decrypted">
-                    ✓ {{ entry.decrypted }}
-                  </dd>
-                } @else {
-                  <dd class="text-red-700">✗ failed authentication</dd>
-                }
               </dl>
             </li>
           }
@@ -71,54 +101,9 @@ export interface LogEntry {
   `,
 })
 export class EncryptionLog {
-  protected readonly entries = signal<readonly LogEntry[]>([]);
-
-  private readonly keys = (async () => {
-    const keyText = generateKeyText();
-    return {
-      encrypt: await importKey(keyText, 'encrypt'),
-      decrypt: await importKey(keyText, 'decrypt'),
-    };
-  })();
-  private seq = 0;
-  /** Edits are processed one at a time, so entries always appear in typing order. */
-  private queue: Promise<void> = Promise.resolve();
-
-  add(text: string): void {
-    const seq = ++this.seq;
-    this.queue = this.queue.then(() => this.process(seq, text));
-  }
-
-  /** Resolves once every edit added so far is in the log. */
-  whenIdle(): Promise<void> {
-    return this.queue;
-  }
+  readonly entries = input.required<readonly LogEntry[]>();
 
   protected preview(ct: string): string {
     return ct.length > CT_PREVIEW_CHARS ? `${ct.slice(0, CT_PREVIEW_CHARS)}…` : ct;
-  }
-
-  private async process(seq: number, plaintext: string): Promise<void> {
-    const keys = await this.keys;
-    const start = performance.now();
-    const frame = await seal(keys.encrypt, PREVIEW_SESSION, seq, plaintext);
-    // The same round trip the real frame makes: JSON over the network, then untrusted input.
-    const wire = JSON.stringify(frame);
-    let decrypted: string | null;
-    try {
-      decrypted = await open(keys.decrypt, PREVIEW_SESSION, parseFrame(JSON.parse(wire)));
-    } catch {
-      decrypted = null;
-    }
-    const entry: LogEntry = {
-      seq,
-      plaintext,
-      iv: frame.iv,
-      ct: frame.ct,
-      wireBytes: new TextEncoder().encode(wire).length,
-      ms: performance.now() - start,
-      decrypted,
-    };
-    this.entries.update((list) => [entry, ...list].slice(0, MAX_ENTRIES));
   }
 }
