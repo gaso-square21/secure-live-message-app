@@ -1,6 +1,8 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { importKey, open } from '../core/crypto';
 import { Frame } from '../core/frame';
 import { CreatedSession, RelayClient } from '../core/relay-client';
+import { SessionGoneError } from '../core/transport';
 import { SenderPage } from './sender-page';
 
 const SESSION: CreatedSession = { sessionId: 'session-1', writeToken: 'write-token' };
@@ -10,6 +12,8 @@ describe('SenderPage', () => {
   let sent: Frame[];
   let createSession: ReturnType<typeof vi.fn>;
   let writeText: ReturnType<typeof vi.fn>;
+  /** When true, the fake relay answers like one that has forgotten the session. */
+  let gone: boolean;
 
   const root = () => fixture.nativeElement as HTMLElement;
   const byTestId = (id: string) => root().querySelector(`[data-testid="${id}"]`);
@@ -32,6 +36,9 @@ describe('SenderPage', () => {
             createSession,
             senderTransport: () => ({
               send: async (frame: Frame) => {
+                if (gone) {
+                  throw new SessionGoneError();
+                }
                 sent.push(frame);
               },
             }),
@@ -57,6 +64,7 @@ describe('SenderPage', () => {
 
   beforeEach(() => {
     sent = [];
+    gone = false;
     createSession = vi.fn().mockResolvedValue(SESSION);
     writeText = vi.fn().mockResolvedValue(undefined);
     setClipboard({ writeText });
@@ -120,6 +128,52 @@ describe('SenderPage', () => {
     expect(clearSpy).toHaveBeenCalledWith(timer);
     setSpy.mockRestore();
     clearSpy.mockRestore();
+  });
+
+  const typeText = async (text: string) => {
+    const textarea = root().querySelector('textarea')!;
+    textarea.value = text;
+    textarea.dispatchEvent(new Event('input'));
+    await settle();
+  };
+
+  it('stops when the session has ended and starts a new one with the current text', async () => {
+    await render();
+    gone = true;
+    await typeText('still typing');
+
+    const textarea = root().querySelector('textarea')!;
+    expect(byTestId('status')?.textContent).toContain('Session ended');
+    expect(byTestId('session-gone')?.textContent).toContain('has ended');
+    expect(textarea.disabled).toBe(true);
+
+    const oldLink = await copiedLink();
+    gone = false;
+    // Answer after a delay, like the network: the page renders its "creating" state in between,
+    // which re-creates the textarea.
+    createSession.mockImplementationOnce(
+      () =>
+        new Promise((resolve) =>
+          setTimeout(() => resolve({ sessionId: 'session-2', writeToken: 'token-2' }), 50),
+        ),
+    );
+    [...root().querySelectorAll('button')]
+      .find((b) => b.textContent?.includes('new session'))!
+      .click();
+    await vi.waitFor(async () => {
+      await fixture.whenStable();
+      expect(sent).toHaveLength(1);
+    });
+
+    expect(byTestId('session-gone')).toBeNull();
+    // The textarea shows exactly what the new session sent, so sender and receiver agree.
+    expect(root().querySelector('textarea')!.disabled).toBe(false);
+    expect(root().querySelector('textarea')!.value).toBe('still typing');
+    const newLink = await copiedLink();
+    expect(newLink.pathname).toBe('/receive/session-2');
+    expect(newLink.hash).not.toBe(oldLink.hash);
+    const newKey = await importKey(newLink.hash.slice(1), 'decrypt');
+    expect(await open(newKey, 'session-2', sent[0])).toBe('still typing');
   });
 
   it('offers to try again when the session cannot be created', async () => {

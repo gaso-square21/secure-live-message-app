@@ -1,6 +1,11 @@
 import { Injectable } from '@angular/core';
 import { Frame } from './frame';
-import { ReceiverHandlers, ReceiverTransport, SenderTransport } from './transport';
+import {
+  ReceiverHandlers,
+  ReceiverTransport,
+  SenderTransport,
+  SessionGoneError,
+} from './transport';
 
 export interface CreatedSession {
   readonly sessionId: string;
@@ -30,6 +35,9 @@ export class RelayClient {
           },
           body: JSON.stringify(frame),
         });
+        if (response.status === 404) {
+          throw new SessionGoneError();
+        }
         if (!response.ok) {
           throw new Error(`Relay rejected frame (${response.status})`);
         }

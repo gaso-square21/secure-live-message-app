@@ -42,7 +42,9 @@ export class ReceiverSession {
   constructor(private readonly options: ReceiverOptions) {
     this.unsubscribe = options.transport.subscribe({
       onFrame: (raw) => {
-        this.queue = this.queue.then(() => this.handle(raw));
+        // The catch keeps the chain alive: one failure (for example in an onState callback)
+        // must not stop every later frame from being processed.
+        this.queue = this.queue.then(() => this.handle(raw)).catch(() => undefined);
       },
       onConnection: (connection) => this.update({ connection }),
     });

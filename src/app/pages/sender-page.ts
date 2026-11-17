@@ -12,6 +12,7 @@ const STATUS_LABEL: Record<SenderStatus, string> = {
   // The relay accepted the latest text; whether a receiver is watching is not known here.
   synced: 'All changes sent',
   retrying: 'Connection problem, retrying…',
+  gone: 'Session ended',
 };
 
 @Component({
@@ -50,12 +51,23 @@ const STATUS_LABEL: Record<SenderStatus, string> = {
           class="mt-1 h-48 w-full rounded-2xl border border-sky-100 bg-white px-3 py-2 focus:border-slate-300 focus-visible:border-slate-300 focus-visible:outline-none"
           maxlength="4000"
           placeholder="Start typing. The receiver sees it live."
+          [disabled]="status() === 'gone'"
+          [value]="text()"
           (input)="onInput($any($event.target).value)"
         ></textarea>
       </div>
       <p class="mt-4 text-sm text-slate-500" role="status" data-testid="status">
         {{ statusLabel[status()] }}
       </p>
+      @if (status() === 'gone') {
+        <app-alert class="mt-3" data-testid="session-gone">
+          This session has ended, so nothing more reaches the receiver. Sessions end after an hour
+          without updates. Start a new session and share its new link.
+        </app-alert>
+        <button appButton class="mt-4" [disabled]="creating()" (click)="restart()">
+          {{ creating() ? 'Starting…' : 'Start a new session' }}
+        </button>
+      }
     } @else if (error()) {
       <app-alert> Could not create a session. Check your connection and try again. </app-alert>
       <button appButton class="mt-4" [disabled]="creating()" (click)="start()">
@@ -79,6 +91,11 @@ export class SenderPage {
   protected readonly copied = signal(false);
   protected readonly copyFailed = signal(false);
   private copiedTimer: ReturnType<typeof setTimeout> | undefined;
+  /**
+   * The current text. The textarea is bound to it, so when the composer is re-created (a new
+   * session after the old one ended) it shows exactly the text the new session sends.
+   */
+  protected readonly text = signal('');
 
   constructor() {
     inject(DestroyRef).onDestroy(() => {
@@ -103,6 +120,9 @@ export class SenderPage {
       });
       const origin = this.document.location.origin;
       this.link.set(`${origin}/receive/${created.sessionId}#${keyText}`);
+      if (this.text()) {
+        this.session.setText(this.text());
+      }
     } catch {
       this.error.set(true);
     } finally {
@@ -132,6 +152,21 @@ export class SenderPage {
   }
 
   protected onInput(text: string): void {
+    this.text.set(text);
     this.session?.setText(text);
+  }
+
+  /** Replaces an ended session with a new one: new id, new key, so a new link to share. */
+  protected async restart(): Promise<void> {
+    this.session?.close();
+    this.session = null;
+    // Hide the old link at once; until the new session exists the page shows its progress, and a
+    // failure falls back to the "Try again" state.
+    this.link.set(null);
+    clearTimeout(this.copiedTimer);
+    this.copied.set(false);
+    this.copyFailed.set(false);
+    this.status.set('idle');
+    await this.start();
   }
 }

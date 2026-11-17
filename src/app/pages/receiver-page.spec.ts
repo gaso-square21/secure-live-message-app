@@ -64,19 +64,62 @@ describe('ReceiverPage', () => {
     expect(text('message')).toBe('second');
   });
 
-  it('never shows the text of a tampered frame', async () => {
+  const message = () =>
+    (fixture.nativeElement as HTMLElement).querySelector('[data-testid="message"]')!;
+
+  it('keeps the verified text, dims it and warns when a tampered frame arrives', async () => {
     const keyText = generateKeyText();
     const key = await importKey(keyText, 'encrypt');
     await open(keyText);
     await settle();
     handlers!.onFrame(await seal(key, SESSION, 1, 'genuine'));
     await settle();
+    expect(text('integrity-alert')).toBeUndefined();
+    expect(message().classList).not.toContain('opacity-60');
 
     const next = await seal(key, SESSION, 2, 'attacker-controlled');
     handlers!.onFrame({ ...next, ct: next.ct.slice(0, -2) + 'AA' });
     await settle();
 
     expect(text('message')).toBe('genuine');
+    expect(message().classList).toContain('opacity-60');
+    expect(text('integrity-alert')).toContain('could not be verified');
+    expect(text('integrity-alert')).toContain('last verified version');
+  });
+
+  it('clears the warning once a valid newer update arrives', async () => {
+    const keyText = generateKeyText();
+    const key = await importKey(keyText, 'encrypt');
+    await open(keyText);
+    await settle();
+    handlers!.onFrame({ ...(await seal(key, SESSION, 1, 'tampered')), ct: 'AAAA' });
+    await settle();
+    expect(text('integrity-alert')).toContain('could not be verified');
+    expect(text('integrity-alert')).not.toContain('last verified version');
+
+    handlers!.onFrame(await seal(key, SESSION, 2, 'clean'));
+    await settle();
+
+    expect(text('integrity-alert')).toBeUndefined();
+    expect(text('message')).toBe('clean');
+    expect(message().classList).not.toContain('opacity-60');
+  });
+
+  it('dims the text while the connection is down', async () => {
+    const keyText = generateKeyText();
+    const key = await importKey(keyText, 'encrypt');
+    await open(keyText);
+    await settle();
+    handlers!.onFrame(await seal(key, SESSION, 1, 'hello'));
+    await settle();
+
+    handlers!.onConnection('lost');
+    await settle();
+    expect(message().classList).toContain('opacity-60');
+
+    handlers!.onConnection('open');
+    await settle();
+    expect(message().classList).not.toContain('opacity-60');
   });
 
   it('renders decrypted markup as text, not HTML', async () => {

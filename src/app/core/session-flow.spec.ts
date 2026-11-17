@@ -2,7 +2,12 @@ import { generateKeyText, importKey, seal } from './crypto';
 import { Frame } from './frame';
 import { ReceiverSession, ReceiverState } from './receiver-session';
 import { SenderSession, SenderStatus } from './sender-session';
-import { ReceiverHandlers, ReceiverTransport, SenderTransport } from './transport';
+import {
+  ReceiverHandlers,
+  ReceiverTransport,
+  SenderTransport,
+  SessionGoneError,
+} from './transport';
 
 /**
  * In-memory stand-in for the relay server. Like the real one it keeps only the latest frame
@@ -15,6 +20,8 @@ class FakeRelay implements SenderTransport, ReceiverTransport {
   /** When set, `send` waits for this promise before completing. */
   gate: Promise<void> | null = null;
   failNextSends = 0;
+  /** When true, every send fails as if the relay had forgotten the session. */
+  gone = false;
 
   private latest: Frame | null = null;
   private handlers: ReceiverHandlers | null = null;
@@ -23,6 +30,9 @@ class FakeRelay implements SenderTransport, ReceiverTransport {
   readonly sentAt: number[] = [];
 
   async send(frame: Frame): Promise<void> {
+    if (this.gone) {
+      throw new SessionGoneError();
+    }
     if (this.failNextSends > 0) {
       this.failNextSends--;
       throw new Error('network down');
@@ -188,6 +198,24 @@ describe('sender concurrency', () => {
     await sender.whenIdle();
     expect(relay.sent).toHaveLength(1);
   });
+
+  it('stops for good, without retrying, once the relay has forgotten the session', async () => {
+    const { sender, relay, statuses } = await setup();
+    sender.setText('delivered');
+    await sender.whenIdle();
+
+    relay.gone = true;
+    const send = vi.spyOn(relay, 'send');
+    sender.setText('too late');
+    await sender.whenIdle();
+    sender.setText('even later');
+    await sender.whenIdle();
+
+    expect(statuses.at(-1)).toBe('gone');
+    expect(statuses).not.toContain('retrying');
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(relay.sent).toHaveLength(1);
+  });
 });
 
 describe('sender throttle', () => {
@@ -315,6 +343,30 @@ describe('receiver under a hostile relay', () => {
 });
 
 describe('receiver ordering', () => {
+  it('keeps processing frames after handling one of them throws', async () => {
+    const relay = new FakeRelay();
+    const keyText = generateKeyText();
+    const key = await importKey(keyText, 'encrypt');
+    let failOnce = true;
+    const receiver = new ReceiverSession({
+      sessionId: SESSION,
+      key: await importKey(keyText, 'decrypt'),
+      transport: relay,
+      onState: (state) => {
+        if (state.text === 'first' && failOnce) {
+          failOnce = false;
+          throw new Error('render failed');
+        }
+      },
+    });
+
+    relay.inject(await seal(key, SESSION, 1, 'first'));
+    relay.inject(await seal(key, SESSION, 2, 'second'));
+    await receiver.whenSettled();
+
+    expect(receiver.snapshot.text).toBe('second');
+  });
+
   it('applies frames in arrival order even though decryption is asynchronous', async () => {
     const { receiver, relay, keyText, shownTexts } = await setup();
     const key = await importKey(keyText, 'encrypt');

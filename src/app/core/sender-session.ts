@@ -1,7 +1,8 @@
 import { seal } from './crypto';
-import { SenderTransport } from './transport';
+import { SenderTransport, SessionGoneError } from './transport';
 
-export type SenderStatus = 'idle' | 'sending' | 'synced' | 'retrying';
+/** `gone` is final: the session no longer exists on the relay, and nothing more is sent. */
+export type SenderStatus = 'idle' | 'sending' | 'synced' | 'retrying' | 'gone';
 
 export interface SenderOptions {
   readonly sessionId: string;
@@ -88,7 +89,14 @@ export class SenderSession {
         // received the frame although the response was lost.
         const frame = await seal(this.options.key, this.options.sessionId, ++this.seq, text);
         await this.options.transport.send(frame);
-      } catch {
+      } catch (error) {
+        if (error instanceof SessionGoneError) {
+          // Retrying a session the relay has forgotten would fail forever: stop for good.
+          this.pumping = false;
+          this.close();
+          this.options.onStatus?.('gone');
+          return;
+        }
         // Keep the failed text unless something newer has been typed since.
         this.pending ??= text;
         failed = true;

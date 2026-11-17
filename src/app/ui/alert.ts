@@ -34,7 +34,7 @@ import { ChangeDetectionStrategy, Component } from '@angular/core';
   host: {
     role: 'alert',
     class:
-      'flex items-center gap-4 rounded-md bg-red-100 px-4 py-3 text-slate-700 border border-red-300',
+      'flex items-center gap-4 rounded-md bg-red-100 px-4 py-3 text-slate-700 border border-red-200',
   },
 })
 export class Alert {}
