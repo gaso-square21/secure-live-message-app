@@ -1,0 +1,11 @@
+{
+  // Format with the project's Prettier (version and .prettierrc from this repo) on every save.
+  "editor.defaultFormatter": "esbenp.prettier-vscode",
+  "editor.formatOnSave": true,
+  "prettier.requireConfig": true,
+  // Apply ESLint auto-fixes on explicit saves too.
+  "editor.codeActionsOnSave": {
+    "source.fixAll.eslint": "explicit"
+  },
+  "eslint.validate": ["typescript", "html"]
+}

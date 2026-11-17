@@ -1,1 +1,11 @@
 @import 'tailwindcss';
+/* Self-hosted, so pages make no requests to third parties (and the CSP can stay 'self'). */
+@import '@fontsource-variable/inter';
+
+@theme {
+  --font-sans: 'Inter Variable', ui-sans-serif, system-ui, sans-serif;
+}
+
+body {
+  @apply bg-sky-900 text-slate-700;
+}
